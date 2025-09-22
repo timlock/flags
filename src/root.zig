@@ -246,32 +246,69 @@ test "set bool flag setter" {
     try std.testing.expect(bool_flag.activated);
 }
 
-const BoolFlag = Flag(bool);
 
 pub const FlagSet = struct {
     name: []const u8,
-    long_map: std.StringArrayHashMap(*Setter),
+    long_map: std.StringArrayHashMap(Setter),
     short_map: std.AutoArrayHashMap(u8, []const u8),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) FlagSet {
         return .{
             .name = name,
-            .long_map = std.StringArrayHashMap(*Setter).init(allocator),
+            .long_map = std.StringArrayHashMap(Setter).init(allocator),
             .short_map = std.AutoArrayHashMap(u8, []const u8).init(allocator),
             .allocator = allocator,
         };
     }
 
-    pub fn Bool(self: *FlagSet, name: []const u8, short: u8, default: bool) !*bool {
-        var flag = BoolFlag.init(default, name, short);
-        var setter //TODO wrap flag in setter
-        try self.short_map.put(short, name);
-        try self.long_map.put(name, flag);
+    pub fn bind(self: *FlagSet, comptime T: type, flag: *Flag(T)) !void {
+        const setter = flag.setter();
+        try self.short_map.put(flag.short, flag.long);
+        try self.long_map.put(flag.long, setter);
     }
 
+    pub fn parse(self: *FlagSet, args: [][]const u8) !void {
+        var key: ?[]const u8 = null;
+        for (args) |arg| {
+            if (key) |key_unwraped| {
+                var setter = self.long_map.get(key_unwraped).?;
+                try setter.set(arg);
+                key = null;
+            } else {
+                key = arg;
+            }
+        }
+    }
     pub fn deinit(self: *FlagSet) FlagSet {
         self.long_map.deinit();
         self.short_map.deinit();
     }
 };
+
+test "flagset" {
+    var general_purpose_allocator: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    const gpa = general_purpose_allocator.allocator();
+
+    var fs = FlagSet.init(gpa, "default");
+
+    const BoolFlag = Flag(bool);
+    const IntFlag = Flag(i32);
+
+    var bool_flag = BoolFlag.init(false, "bool", 'b');
+    try fs.bind(bool, &bool_flag);
+    var int_flag = IntFlag.init(0, "int", 'i');
+    try fs.bind(i32, &int_flag);
+
+    var args_list = try std.ArrayList([]const u8).initCapacity(gpa, 100);
+    defer args_list.deinit(gpa);
+    try args_list.append(gpa, "bool");
+    try args_list.append(gpa, "true");
+    try args_list.append(gpa, "int");
+    try args_list.append(gpa, "1");
+
+    const slice = try args_list.toOwnedSlice(gpa);
+
+    try fs.parse(slice);
+    std.debug.print("bool: {any} int: {any}\n", .{ bool_flag, int_flag });
+}
