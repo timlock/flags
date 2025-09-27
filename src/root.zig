@@ -311,9 +311,103 @@ test "flagset" {
 }
 test "any flag" {
     var bool_value = false;
-    var flag = AnyFlag.init(bool, &bool_value, "", ' ');
+    var flag = AnyFlag.init2(bool, &bool_value, "", ' ', FlagParser(bool));
     try flag.setterFn(&bool_value, "true");
 }
+
+pub fn FlagParser(comptime T: type) type {
+    return struct {
+        pub fn setter(ptr: *anyopaque, input: []const u8) Error!void {
+            const value_t: *T = @ptrCast(@alignCast(ptr));
+
+            if (T == []const u8 or T == []u8) {
+                value_t.* = input;
+            } else switch (@typeInfo(T)) {
+                .bool => {
+                    if (std.mem.eql(u8, "true", input)) {
+                        value_t.* = true;
+                    } else if (std.mem.eql(u8, "false", input)) {
+                        value_t.* = false;
+                    } else {
+                        return Error.ParseBoolError;
+                    }
+                },
+                .int => value_t.* = std.fmt.parseInt(T, input, 10) catch return Error.ParseIntError,
+                .float => value_t.* = std.fmt.parseFloat(T, input) catch return Error.ParseFloatError,
+                .@"enum" => {
+                    if (std.meta.stringToEnum(T, input)) |enum_field| {
+                        value_t.* = enum_field;
+                    } else return Error.ParseEnumError;
+                },
+                else => @compileError("Unsupported type for Flag.parse: " ++ @typeName(T)),
+            }
+        }
+        pub fn activate(ptr: *anyopaque) Error!void {
+            if (T != bool) {
+                return Error.NoBoolFlag;
+            }
+
+            const value_t: *T = @ptrCast(@alignCast(ptr));
+            value_t.* = true;
+        }
+    };
+}
+
+pub fn IntFlagParser(comptime T: type) type {
+    return struct {
+        pub fn setter(ptr: *anyopaque, input: []const u8) Error!void {
+            const value_t: *T = @ptrCast(@alignCast(ptr));
+
+            if (T == []const u8 or T == []u8) {
+                value_t.* = input;
+            } else switch (@typeInfo(T)) {
+                .bool => {
+                    if (std.mem.eql(u8, "true", input)) {
+                        value_t.* = true;
+                    } else if (std.mem.eql(u8, "false", input)) {
+                        value_t.* = false;
+                    } else {
+                        return Error.ParseBoolError;
+                    }
+                },
+                .int => value_t.* = std.fmt.parseInt(T, input, 10) catch return Error.ParseIntError,
+                .float => value_t.* = std.fmt.parseFloat(T, input) catch return Error.ParseFloatError,
+                .@"enum" => {
+                    if (std.meta.stringToEnum(T, input)) |enum_field| {
+                        value_t.* = enum_field;
+                    } else return Error.ParseEnumError;
+                },
+                else => @compileError("Unsupported type for Flag.parse: " ++ @typeName(T)),
+            }
+        }
+        pub fn activate(ptr: *anyopaque) Error!void {
+            if (T != bool) {
+                return Error.NoBoolFlag;
+            }
+
+            const value_t: *T = @ptrCast(@alignCast(ptr));
+            value_t.* = true;
+        }
+    };
+}
+
+const BoolFlagParser = struct {
+    pub fn setter(ptr: *anyopaque, input: []const u8) Error!void {
+        const value_t: *bool = @ptrCast(@alignCast(ptr));
+        if (std.mem.eql(u8, "true", input)) {
+            value_t.* = true;
+        } else if (std.mem.eql(u8, "false", input)) {
+            value_t.* = false;
+        } else {
+            return Error.ParseBoolError;
+        }
+    }
+
+    pub fn activate(ptr: *anyopaque) Error!void {
+        const value_t: *bool = @ptrCast(@alignCast(ptr));
+        value_t.* = true;
+    }
+};
 
 const AnyFlag = struct {
     value: *anyopaque,
@@ -323,6 +417,22 @@ const AnyFlag = struct {
     setterFn: *const fn (value: *anyopaque, input: []const u8) Error!void,
     activateFn: *const fn (value: *anyopaque) Error!void,
     const Self = @This();
+
+    pub fn init2(
+        comptime T: type,
+        value: *T,
+        long: []const u8,
+        short: u8,
+        comptime gen: type,
+    ) Self {
+        return .{
+            .value = value,
+            .long = long,
+            .short = short,
+            .setterFn = gen.setter,
+            .activateFn = gen.activate,
+        };
+    }
 
     pub fn init(comptime T: type, value: *T, long: []const u8, short: u8) AnyFlag {
         const gen = struct {
