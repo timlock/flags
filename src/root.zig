@@ -246,26 +246,26 @@ test "set bool flag setter" {
     try std.testing.expect(bool_flag.activated);
 }
 
-
 pub const FlagSet = struct {
     name: []const u8,
-    long_map: std.StringArrayHashMap(Setter),
+    long_map: std.StringArrayHashMap(AnyFlag),
     short_map: std.AutoArrayHashMap(u8, []const u8),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) FlagSet {
         return .{
             .name = name,
-            .long_map = std.StringArrayHashMap(Setter).init(allocator),
+            .long_map = std.StringArrayHashMap(AnyFlag).init(allocator),
             .short_map = std.AutoArrayHashMap(u8, []const u8).init(allocator),
             .allocator = allocator,
         };
     }
 
-    pub fn bind(self: *FlagSet, comptime T: type, flag: *Flag(T)) !void {
-        const setter = flag.setter();
-        try self.short_map.put(flag.short, flag.long);
-        try self.long_map.put(flag.long, setter);
+    pub fn bind(self: *FlagSet, comptime T: type, value: *T, name: []const u8) !void {
+        const flag = AnyFlag.init(T, value, name, name[0]);
+
+        try self.short_map.put(name[0], name);
+        try self.long_map.put(name, flag);
     }
 
     pub fn parse(self: *FlagSet, args: [][]const u8) !void {
@@ -273,7 +273,7 @@ pub const FlagSet = struct {
         for (args) |arg| {
             if (key) |key_unwraped| {
                 var setter = self.long_map.get(key_unwraped).?;
-                try setter.set(arg);
+                try setter.setterFn(setter.value, arg);
                 key = null;
             } else {
                 key = arg;
@@ -292,13 +292,10 @@ test "flagset" {
 
     var fs = FlagSet.init(gpa, "default");
 
-    const BoolFlag = Flag(bool);
-    const IntFlag = Flag(i32);
-
-    var bool_flag = BoolFlag.init(false, "bool", 'b');
-    try fs.bind(bool, &bool_flag);
-    var int_flag = IntFlag.init(0, "int", 'i');
-    try fs.bind(i32, &int_flag);
+    var bool_value = false;
+    try fs.bind(bool, &bool_value, "bool");
+    var int_value: i32 = 0;
+    try fs.bind(i32, &int_value, "int");
 
     var args_list = try std.ArrayList([]const u8).initCapacity(gpa, 100);
     defer args_list.deinit(gpa);
@@ -310,5 +307,75 @@ test "flagset" {
     const slice = try args_list.toOwnedSlice(gpa);
 
     try fs.parse(slice);
-    std.debug.print("bool: {any} int: {any}\n", .{ bool_flag, int_flag });
+    std.debug.print("bool: {any} int: {any}\n", .{ bool_value, int_value });
 }
+test "any flag" {
+    var bool_value = false;
+    var flag = AnyFlag.init(bool, &bool_value, "", ' ');
+    try flag.setterFn(&bool_value, "true");
+}
+
+const AnyFlag = struct {
+    value: *anyopaque,
+    long: []const u8,
+    short: u8,
+    activated: bool = false,
+    setterFn: *const fn (value: *anyopaque, input: []const u8) Error!void,
+    activateFn: *const fn (value: *anyopaque) Error!void,
+    const Self = @This();
+
+    pub fn init(comptime T: type, value: *T, long: []const u8, short: u8) AnyFlag {
+        const gen = struct {
+            pub fn setter(ptr: *anyopaque, input: []const u8) Error!void {
+                const value_t: *T = @ptrCast(@alignCast(ptr));
+
+                if (T == []const u8 or T == []u8) {
+                    value_t.* = input;
+                } else switch (@typeInfo(T)) {
+                    .bool => {
+                        if (std.mem.eql(u8, "true", input)) {
+                            value_t.* = true;
+                        } else if (std.mem.eql(u8, "false", input)) {
+                            value_t.* = false;
+                        } else {
+                            return Error.ParseBoolError;
+                        }
+                    },
+                    .int => value_t.* = std.fmt.parseInt(T, input, 10) catch return Error.ParseIntError,
+                    .float => value_t.* = std.fmt.parseFloat(T, input) catch return Error.ParseFloatError,
+                    .@"enum" => {
+                        if (std.meta.stringToEnum(T, input)) |enum_field| {
+                            value_t.* = enum_field;
+                        } else return Error.ParseEnumError;
+                    },
+                    else => @compileError("Unsupported type for Flag.parse: " ++ @typeName(T)),
+                }
+            }
+            pub fn activate(ptr: *anyopaque) Error!void {
+                if (T != bool) {
+                    return Error.NoBoolFlag;
+                }
+
+                const value_t: *T = @ptrCast(@alignCast(ptr));
+                value_t.* = true;
+            }
+        };
+        return .{
+            .value = value,
+            .long = long,
+            .short = short,
+            .setterFn = gen.setter,
+            .activateFn = gen.activate,
+        };
+    }
+
+    pub fn set(self: *AnyFlag, input: []const u8) Error!void {
+        try self.setterFn(self.value, input);
+        self.activated = true;
+    }
+
+    pub fn activate(self: *AnyFlag) Error!void {
+        try self.activateFn(self.value);
+        self.activated = true;
+    }
+};
