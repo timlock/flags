@@ -6,13 +6,79 @@ const Error = error{
     ParseIntError,
     ParseFloatError,
     ParseEnumError,
+    TooManyArguments,
 };
+
+const ListFlag = struct {
+    value: *anyopaque,
+    length: usize = 0,
+    capacity: usize,
+    element_size: usize,
+    long: []const u8,
+    activated: bool = false,
+    options: Options,
+
+    const Options = struct {
+        setter_fn: *const fn (value: *anyopaque, input: []const u8) Error!void,
+        activate_fn: ?*const fn (value: *anyopaque) Error!void = null,
+        short: ?u8 = null,
+    };
+
+    const Self = @This();
+
+    fn init(
+        value: *anyopaque,
+        capacity: usize,
+        element_size: usize,
+        long: []const u8,
+        options: Options,
+    ) ListFlag {
+        return .{
+            .value = value,
+            .capacity = capacity,
+            .element_size = element_size,
+            .long = long,
+            .options = options,
+        };
+    }
+
+    pub fn set(self: *ListFlag, input: []const u8) Error!void {
+        if (self.length >= self.capacity) {
+            return Error.TooManyArguments;
+        }
+
+        const next_ptr: *anyopaque = @ptrFromInt(@intFromPtr(self.value) + self.element_size * self.length);
+
+        try self.options.setter_fn(next_ptr, input);
+
+        self.length += 1;
+        self.activated = true;
+    }
+
+    pub fn activate(self: *ListFlag) Error!void {
+        const activate_fn = self.options.activate_fn orelse return Error.NoBoolFlag;
+        try activate_fn(self.value);
+        self.activated = true;
+    }
+};
+
+test "int list flag" {
+    var int_values = [_]i32{ 0, 0 };
+    var list_flag = ListFlag.init(@ptrCast(@alignCast(&int_values)), int_values.len, @sizeOf(i32), "int", .{
+        .setter_fn = set_int_factory(i32),
+    });
+
+    try list_flag.set("1");
+    try list_flag.set("2");
+
+    try std.testing.expectEqual([2]i32{ 1, 2 }, int_values);
+}
 
 const Flag = struct {
     value: *anyopaque,
     long: []const u8,
     activated: bool = false,
-    parser: Options,
+    options: Options,
 
     const Options = struct {
         setter_fn: *const fn (value: *anyopaque, input: []const u8) Error!void,
@@ -30,17 +96,29 @@ const Flag = struct {
         return .{
             .value = value,
             .long = long,
-            .parser = options,
+            .options = options,
+        };
+    }
+
+    fn initString(
+        value: *[]const u8,
+        long: []const u8,
+        options: Options,
+    ) Flag {
+        return .{
+            .value = @ptrCast(value),
+            .long = long,
+            .options = options,
         };
     }
 
     pub fn set(self: *Flag, input: []const u8) Error!void {
-        try self.parser.setter_fn(self.value, input);
+        try self.options.setter_fn(self.value, input);
         self.activated = true;
     }
 
     pub fn activate(self: *Flag) Error!void {
-        const activate_fn = self.parser.activate_fn orelse return Error.NoBoolFlag;
+        const activate_fn = self.options.activate_fn orelse return Error.NoBoolFlag;
         try activate_fn(self.value);
         self.activated = true;
     }
@@ -124,7 +202,10 @@ test "parse int error" {
 
 test "set float flag" {
     var float_value: f32 = 0;
-    var float_flag = Flag.init(&float_value, "float", .{});
+    var float_flag = Flag.init(&float_value, "float", .{
+        .setter_fn = set_float_factory(f32),
+    });
+
     try std.testing.expectEqual(0, float_value);
     try std.testing.expect(!float_flag.activated);
 
@@ -135,7 +216,10 @@ test "set float flag" {
 
 test "parse float error" {
     var float_value: f32 = 0;
-    var float_flag = Flag.init(&float_value, "float", .{});
+    var float_flag = Flag.init(&float_value, "float", .{
+        .setter_fn = set_float_factory(f32),
+    });
+
     try std.testing.expectEqual(0, float_value);
     try std.testing.expect(!float_flag.activated);
 
@@ -147,21 +231,27 @@ test "parse float error" {
 }
 
 test "set string flag" {
-    var string_value = "empty";
-    var string_flag = Flag.init(&string_value, "string", .{});
+    var string_value: []const u8 = "empty";
+    var string_flag = Flag.initString(&string_value, "string", .{
+        .setter_fn = set_string,
+    });
+
     try std.testing.expectEqual("empty", string_value);
     try std.testing.expect(!string_flag.activated);
 
-    try string_flag.set("full");
+    try string_flag.set("not empty");
     try std.testing.expect(string_flag.activated);
-    try std.testing.expectEqual("full", string_value);
+    try std.testing.expectEqual("not empty", string_value);
 }
 
 test "set enum flag" {
     const MyEnum = enum { A, B };
     var enum_value = MyEnum.A;
 
-    var enum_flag = Flag.init(&enum_value, "enum", .{});
+    var enum_flag = Flag.init(&enum_value, "enum", .{
+        .setter_fn = set_enum_factory(MyEnum),
+    });
+
     try std.testing.expectEqual(MyEnum.A, enum_value);
     try std.testing.expect(!enum_flag.activated);
 
@@ -174,7 +264,10 @@ test "parse enum error" {
     const MyEnum = enum { A, B };
     var enum_value = MyEnum.A;
 
-    var enum_flag = Flag.init(&enum_value, "enum", .{});
+    var enum_flag = Flag.init(&enum_value, "enum", .{
+        .setter_fn = set_enum_factory(MyEnum),
+    });
+
     try std.testing.expectEqual(MyEnum.A, enum_value);
     try std.testing.expect(!enum_flag.activated);
 
@@ -282,6 +375,9 @@ test "flagset" {
     std.debug.print("bool: {any} int: {any}\n", .{ bool_value, int_value });
 }
 test "any flag" {
+    const info = @typeInfo([]i32);
+    std.debug.print("{}\n", .{info});
+
     var bool_value = false;
     var bool_flag = Flag.init(&bool_value, "", .{
         .setter_fn = set_bool,
